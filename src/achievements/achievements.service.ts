@@ -3,6 +3,8 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { Achievement } from './entities/achievement.entity';
 import { PlayerAchievement } from './entities/player-achievement.entity';
+import { EventEmitter2 } from '@nestjs/event-emitter';
+import { EventName } from '../events/events.enum';
 
 @Injectable()
 export class AchievementsService {
@@ -11,6 +13,7 @@ export class AchievementsService {
     private readonly achievementRepo: Repository<Achievement>,
     @InjectRepository(PlayerAchievement)
     private readonly playerAchRepo: Repository<PlayerAchievement>,
+    private readonly eventEmitter: EventEmitter2,
   ) {}
 
   async getAll(): Promise<Achievement[]> {
@@ -47,7 +50,10 @@ export class AchievementsService {
       if (satisfied) {
         const pa = this.playerAchRepo.create({ userId, achievementId: ach.id });
         await this.playerAchRepo.save(pa);
-        // Emit event for other modules (e.g., NFT minting) if needed – omitted here.
+        this.eventEmitter.emit(EventName.AchievementUnlocked, {
+          userId,
+          achievementId: ach.id,
+        });
       }
     }
   }

@@ -29,6 +29,7 @@ import { ScheduleModule } from '@nestjs/schedule';
 import { AppController } from './app.controller';
 import { AppService } from './app.service';
 import { StreakModule } from './streak/streak.module';
+import { SocialModule } from './social/social.module';
 
 @Module({
   imports: [
@@ -64,6 +65,7 @@ import { StreakModule } from './streak/streak.module';
     }),
     ScheduleModule.forRoot(),
     StreakModule,
+    SocialModule,
   ],
   controllers: [AppController],
   providers: [EventService],
