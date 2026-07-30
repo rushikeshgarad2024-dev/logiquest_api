@@ -3,13 +3,42 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, IsNull } from 'typeorm';
 import { LeaderboardEntry } from './entities/leaderboard-entry.entity';
 import { LeaderboardQueryDto, LeaderboardEntryDto } from './dto/leaderboard.dto';
+import { SocialService } from '../social/social.service';
 
 @Injectable()
 export class LeaderboardService {
   constructor(
     @InjectRepository(LeaderboardEntry)
     private readonly repo: Repository<LeaderboardEntry>,
+    private readonly socialService: SocialService,
   ) {}
+
+  async getFriendsLeaderboard(userId: string, query: LeaderboardQueryDto): Promise<LeaderboardEntryDto[]> {
+    const following = await this.socialService.getFollowing(userId);
+    const followingIds = following.map(u => u.id);
+    if (followingIds.length === 0) {
+      return [];
+    }
+    const { limit = 20, page = 1, category } = query;
+    const qb = this.repo.createQueryBuilder('lb')
+      .where('lb.playerId IN (:...followingIds)', { followingIds })
+      .orderBy('lb.totalScore', 'DESC')
+      .addOrderBy('lb.createdAt', 'ASC')
+      .skip((page - 1) * limit)
+      .take(limit);
+    if (category) {
+      qb.andWhere('lb.category = :category', { category });
+    } else {
+      qb.andWhere('lb.category IS NULL');
+    }
+    const entries = await qb.getMany();
+    return entries.map((e, idx) => ({
+      userId: e.playerId,
+      totalScore: e.totalScore,
+      category: e.category ?? undefined,
+      rank: (page - 1) * limit + idx + 1,
+    }));
+  }
 
   /** Get top entries with pagination and optional category filter */
   async getTop(query: LeaderboardQueryDto): Promise<LeaderboardEntryDto[]> {

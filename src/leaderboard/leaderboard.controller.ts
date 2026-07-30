@@ -8,11 +8,26 @@ import {
 import { Request } from 'express';
 import { LeaderboardService } from './leaderboard.service';
 import { LeaderboardQueryDto, LeaderboardEntryDto } from './dto/leaderboard.dto';
+import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 
 @ApiTags('leaderboard')
 @Controller('leaderboard')
 export class LeaderboardController {
   constructor(private readonly leaderboardService: LeaderboardService) {}
+
+  @Get('friends')
+  @UseGuards(JwtAuthGuard)
+  @ApiBearerAuth('access-token')
+  @ApiOperation({ summary: 'Get a leaderboard scoped to followed players' })
+  @ApiResponse({ status: 200, description: 'Friends leaderboard entries', type: [LeaderboardEntryDto] })
+  @ApiResponse({ status: 401, description: 'Unauthenticated' })
+  async getFriendsLeaderboard(@Req() req: Request, @Query() query: LeaderboardQueryDto): Promise<LeaderboardEntryDto[]> {
+    const userId = (req as any).user?.id;
+    if (!userId) {
+      throw new Error('User not authenticated');
+    }
+    return this.leaderboardService.getFriendsLeaderboard(userId, query);
+  }
 
   @Get()
   @ApiOperation({ summary: 'Get the global (or category-scoped) top rankings' })

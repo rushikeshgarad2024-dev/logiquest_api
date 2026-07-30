@@ -4,12 +4,14 @@ import { Model, Types } from 'mongoose';
 import { Streak } from '../schemas/streak.schema';
 import { StreakEvents } from '../events/streak.events';
 import { streakConfig } from '../config/streak.config';
+import { EventEmitter2 } from '@nestjs/event-emitter';
 
 @Injectable()
 export class StreakService {
   constructor(
     @InjectModel(Streak.name) private streakModel: Model<Streak>,
     private readonly streakEvents: StreakEvents,
+    private readonly eventEmitter: EventEmitter2,
   ) {}
 
   private getUTCDateString(date: Date = new Date()): string {
@@ -56,11 +58,20 @@ export class StreakService {
       streak.currentStreak = 1;
     }
 
+    const isNewRecord = streak.currentStreak > streak.longestStreak;
+
     streak.lastActiveDate = now;
     await streak.save();
 
     this.checkMilestones(streak);
     this.checkStellaRewards(streak);
+
+    if (isNewRecord) {
+      this.eventEmitter.emit('streak.record-broken', {
+        userId: userId,
+        currentStreak: streak.currentStreak,
+      });
+    }
 
     return streak;
   }
