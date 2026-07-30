@@ -9,6 +9,7 @@ import { LessThan, Repository } from 'typeorm';
 import { Session, SessionStatus } from './entities/session.entity';
 import { CreateSessionDto } from './dto/create-session.dto';
 import { SubmitSolutionDto } from './dto/submit-solution.dto';
+import { SessionGateway } from '../gateway/session.gateway';
 
 /**
  * In-memory session record used by the hints module for lightweight,
@@ -29,6 +30,7 @@ export class SessionsService {
   constructor(
     @InjectRepository(Session)
     private readonly sessionRepo: Repository<Session>,
+    private readonly sessionGateway: SessionGateway,
   ) {}
 
   // ---------------------------------------------------------------------------
@@ -85,7 +87,17 @@ export class SessionsService {
       status: SessionStatus.ACTIVE,
       locale: locale ?? dto.locale ?? DEFAULT_LOCALE,
     });
-    return this.sessionRepo.save(session);
+    const savedSession = await this.sessionRepo.save(session);
+    
+    // Emit session:joined event
+    this.sessionGateway.emitSessionJoined(savedSession.id, {
+      sessionId: savedSession.id,
+      userId: savedSession.userId,
+      puzzleId: savedSession.puzzleId,
+      startedAt: savedSession.startedAt,
+    });
+    
+    return savedSession;
   }
 
   async submit(
@@ -110,7 +122,30 @@ export class SessionsService {
       session.hintsUsed = dto.hintsUsed;
     }
 
-    return this.sessionRepo.save(session);
+    const savedSession = await this.sessionRepo.save(session);
+    
+    // Emit session:score_update event when score changes
+    if (correct) {
+      this.sessionGateway.emitScoreUpdate(savedSession.id, {
+        sessionId: savedSession.id,
+        score: savedSession.score,
+        timestamp: new Date(),
+      });
+      
+      // Emit session:completed event when puzzle is solved
+      const timeElapsed = Math.floor(
+        (savedSession.completedAt!.getTime() - savedSession.startedAt.getTime()) / 1000,
+      );
+      this.sessionGateway.emitSessionCompleted(savedSession.id, {
+        sessionId: savedSession.id,
+        finalScore: savedSession.score,
+        completedAt: savedSession.completedAt!,
+        hintsUsed: savedSession.hintsUsed,
+        timeElapsed,
+      });
+    }
+    
+    return savedSession;
   }
 
   async abandon(userId: string, sessionId: string): Promise<Session> {
@@ -144,6 +179,12 @@ export class SessionsService {
     }
     await this.sessionRepo.save(stale);
     return stale.length;
+  }
+
+  async getActiveSessions(): Promise<Session[]> {
+    return this.sessionRepo.find({
+      where: { status: SessionStatus.ACTIVE },
+    });
   }
 
   private async findOwned(userId: string, sessionId: string): Promise<Session> {

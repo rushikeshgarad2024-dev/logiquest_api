@@ -22,6 +22,7 @@ import { SessionsModule } from './sessions/sessions.module';
 import { LeaderboardModule } from './leaderboard/leaderboard.module';
 import { NftModule } from './nft/nft.module';
 import { CalibrationModule } from './calibration/calibration.module';
+import { GatewayModule } from './gateway/gateway.module';
 import { RecommendationsModule } from './recommendations/recommendations.module';
 import { MongooseModule } from '@nestjs/mongoose';
 import { ConfigModule, ConfigService } from '@nestjs/config';
@@ -54,6 +55,7 @@ import { SocialModule } from './social/social.module';
     LeaderboardModule,
     NftModule,
     CalibrationModule,
+    GatewayModule,
     RecommendationsModule,
     ConfigModule.forRoot({ isGlobal: true }),
     MongooseModule.forRootAsync({

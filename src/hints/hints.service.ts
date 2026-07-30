@@ -2,6 +2,7 @@ import { Injectable, BadRequestException, NotFoundException } from '@nestjs/comm
 import { Hint } from './entities/hint.entity';
 import { SessionsService } from '../sessions/sessions.service';
 import { ScoringService } from '../scoring/scoring.service';
+import { SessionGateway } from '../gateway/session.gateway';
 
 @Injectable()
 export class HintsService {
@@ -11,6 +12,7 @@ export class HintsService {
   constructor(
     private readonly sessionsService: SessionsService,
     private readonly scoringService: ScoringService,
+    private readonly sessionGateway: SessionGateway,
   ) {
     // Seed some initial hints for puzzles
     // Supporting up to three tiered hints per puzzle (orders 1, 2, 3)
@@ -61,6 +63,14 @@ export class HintsService {
 
     // 3. Trigger score penalty via the scoring module (hints cost points)
     this.scoringService.penalize(sessionId, 10);
+
+    // Emit session:hint_revealed event
+    this.sessionGateway.emitHintRevealed(sessionId, {
+      sessionId,
+      hintIndex: nextHint.order,
+      hintText: nextHint.content,
+      hintsUsed: revealedOrders.size,
+    });
 
     return nextHint;
   }
