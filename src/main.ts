@@ -1,5 +1,5 @@
 import { NestFactory } from '@nestjs/core';
-import { ValidationPipe } from '@nestjs/common';
+import { ValidationPipe, VersioningType } from '@nestjs/common';
 import type { NestExpressApplication } from '@nestjs/platform-express';
 import { SwaggerModule, DocumentBuilder } from '@nestjs/swagger';
 import helmet from 'helmet';
@@ -9,6 +9,13 @@ import { ConfigService } from '@nestjs/config';
 async function bootstrap() {
   try {
     const app = await NestFactory.create<NestExpressApplication>(AppModule, { abortOnError: false });
+    
+    // Configure global URI-based versioning (/v1/..., /v2/...)
+    app.enableVersioning({
+      type: VersioningType.URI,
+      defaultVersion: '1', // Routes without explicit @Version() resolve to v1
+    });
+
     app.useGlobalPipes(
       new ValidationPipe({
         whitelist: true,
@@ -25,14 +32,19 @@ async function bootstrap() {
         .setTitle('LogiQuest API')
         .setDescription(
           `REST API for the LogiQuest puzzle platform.\n\n` +
+          `## API Versioning\n` +
+          `Endpoints are versioned via URI paths (e.g., \`/v1/puzzles\`, \`/v2/puzzles\`):\n` +
+          `- **v1 (Deprecated)** – Preserved for legacy clients. Deprecated routes include \`Deprecation\` headers.\n` +
+          `- **v2 (Current)** – Active API contract for new client implementations.\n` +
+          `- **Unversioned Requests** – Automatically fallback to \`v1\`.\n\n` +
           `## Authentication\n` +
-          `Most endpoints require a JWT Bearer token obtained from \`POST /auth/login\` or \`POST /auth/register\`.\n` +
+          `Most endpoints require a JWT Bearer token obtained from \`POST /v1/auth/login\` or \`POST /v1/auth/register\`.\n` +
           `Pass it as: \`Authorization: Bearer <token>\`\n\n` +
           `## Roles\n` +
           `- **player** – default role for registered users\n` +
           `- **admin** – elevated role required for admin-only endpoints`,
         )
-        .setVersion('1.0')
+        .setVersion('2.0')
         .setContact('MindFlow Interactive', 'https://github.com/MindFlowInteractive/logiquest_api', '')
         .setLicense('ISC', '')
         .addBearerAuth(
