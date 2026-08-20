@@ -31,10 +31,12 @@ import { AppController } from './app.controller';
 import { AppService } from './app.service';
 import { StreakModule } from './streak/streak.module';
 import { SocialModule } from './social/social.module';
+import { JobsModule } from './jobs/jobs.module';
 
 @Module({
   imports: [
     AppConfigModule,
+    JobsModule,
     DatabaseModule,
     EventEmitterModule.forRoot({ global: true }),
     AuthModule,
