@@ -1,4 +1,4 @@
-import { Controller, Get, Patch, Param, Query, UseGuards, Request, Body, BadRequestException } from '@nestjs/common';
+import { Controller, Get, Patch, Post, Param, Query, UseGuards, Request, Body, BadRequestException } from '@nestjs/common';
 import {
   ApiTags,
   ApiOperation,
@@ -9,6 +9,7 @@ import {
   ApiBody,
 } from '@nestjs/swagger';
 import { AdminService } from './admin.service';
+import { JobsService } from '../jobs/jobs.service';
 import { JwtAuthGuard } from '../common/guards/jwt-auth.guard';
 import { RolesGuard } from '../common/guards/roles.guard';
 import { Roles } from '../common/decorators/roles.decorator';
@@ -24,7 +25,10 @@ import { SessionFilterDto } from './dto/session-filter.dto';
 @ApiResponse({ status: 401, description: 'Unauthenticated' })
 @ApiResponse({ status: 403, description: 'Forbidden — admin role required' })
 export class AdminController {
-  constructor(private readonly adminService: AdminService) {}
+  constructor(
+    private readonly adminService: AdminService,
+    private readonly jobsService: JobsService,
+  ) {}
 
   @Get('users')
   @ApiOperation({ summary: 'List all users with pagination' })
@@ -87,5 +91,21 @@ export class AdminController {
     }
     const adminId = req.user.id;
     return this.adminService.rejectSubmission(adminId, id, reason);
+  }
+
+  @Get('jobs/status')
+  @ApiOperation({ summary: 'Get background job queue status and failed counts across all queues' })
+  @ApiResponse({ status: 200, description: 'Queue depths and failed job counts per queue' })
+  getJobStatus() {
+    return this.jobsService.getQueueStatus();
+  }
+
+  @Post('jobs/:queue/retry-failed')
+  @ApiOperation({ summary: 'Re-enqueue all dead-letter / failed jobs for a given queue' })
+  @ApiParam({ name: 'queue', description: 'Name of the queue (email, nft, leaderboard, calibration, streaks)' })
+  @ApiResponse({ status: 200, description: 'Failed jobs re-enqueued successfully' })
+  @ApiResponse({ status: 404, description: 'Queue not found' })
+  retryFailedJobs(@Param('queue') queue: string) {
+    return this.jobsService.retryFailedJobs(queue);
   }
 }
