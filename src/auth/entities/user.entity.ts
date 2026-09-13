@@ -28,6 +28,15 @@ export class User {
   @Column({ nullable: true })
   avatarUrl: string;
 
+  @Column({ default: false })
+  isTwoFactorEnabled: boolean;
+
+  @Column({ nullable: true })
+  twoFactorSecret: string;
+
+  @Column('simple-array', { nullable: true })
+  twoFactorBackupCodes: string[];
+
   @OneToMany(() => OAuthProvider, (oauth) => oauth.user, { cascade: true })
   oauthProviders: OAuthProvider[];
 
