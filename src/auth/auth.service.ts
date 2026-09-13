@@ -2,6 +2,8 @@ import {
   Injectable,
   UnauthorizedException,
   ConflictException,
+  BadRequestException,
+  NotFoundException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
@@ -14,6 +16,15 @@ import { RefreshToken } from './entities/refresh-token.entity';
 import { RegisterDto } from './dto/register.dto';
 import { LoginDto } from './dto/login.dto';
 import { createHash } from 'node:crypto';
+import {
+  generateBase32Secret,
+  generateTotpUri,
+  verifyTotp,
+  generateBackupCodes,
+  hashBackupCode,
+  encryptSecret,
+  decryptSecret,
+} from './utils/totp.util';
 
 interface OAuthProfile {
   provider: string;
@@ -35,6 +46,10 @@ export class AuthService {
     private jwtService: JwtService,
     private configService: ConfigService,
   ) {}
+
+  private getEncryptionKey(): string {
+    return this.configService.get<string>('TWO_FACTOR_ENCRYPTION_KEY', 'logiquest-2fa-secret-key-32b');
+  }
 
   private generateTokenPair(user: User) {
     const payload = { sub: user.id, username: user.username, email: user.email };
@@ -69,7 +84,6 @@ export class AuthService {
     const match = expiry.match(/^(\d+)([dhm])$/);
     
     if (!match) {
-      // Default to 7 days if format is invalid
       now.setDate(now.getDate() + 7);
       return now;
     }
@@ -132,28 +146,147 @@ export class AuthService {
       throw new UnauthorizedException('Invalid credentials');
     }
 
+    if (user.isTwoFactorEnabled) {
+      return {
+        requires2FA: true,
+        userId: user.id,
+        message: 'Two-factor authentication code required',
+      };
+    }
+
     const tokens = this.generateTokenPair(user);
     await this.storeRefreshToken(user.id, tokens.refreshToken);
     return tokens;
   }
 
   /**
+   * Set up TOTP 2FA secret and backup recovery codes for user.
+   */
+  async setupTwoFactor(userId: string) {
+    const user = await this.userRepository.findOne({ where: { id: userId } });
+    if (!user) {
+      throw new NotFoundException('User not found');
+    }
+
+    const rawSecret = generateBase32Secret(20);
+    const backup = generateBackupCodes(8);
+    const qrCodeUri = generateTotpUri(user.email || user.username, rawSecret, 'LogiQuest');
+    const encryptedSecret = encryptSecret(rawSecret, this.getEncryptionKey());
+
+    user.twoFactorSecret = encryptedSecret;
+    user.twoFactorBackupCodes = backup.hashedCodes;
+    await this.userRepository.save(user);
+
+    return {
+      secret: rawSecret,
+      qrCodeUri,
+      backupCodes: backup.rawCodes,
+    };
+  }
+
+  /**
+   * Verify initial TOTP code to confirm and enable 2FA.
+   */
+  async enableTwoFactor(userId: string, code: string) {
+    const user = await this.userRepository.findOne({ where: { id: userId } });
+    if (!user || !user.twoFactorSecret) {
+      throw new BadRequestException('2FA setup has not been initiated');
+    }
+
+    const rawSecret = decryptSecret(user.twoFactorSecret, this.getEncryptionKey());
+    const isValid = verifyTotp(code, rawSecret);
+
+    if (!isValid) {
+      throw new UnauthorizedException('Invalid 2FA verification code');
+    }
+
+    user.isTwoFactorEnabled = true;
+    await this.userRepository.save(user);
+
+    return {
+      message: 'Two-factor authentication successfully enabled',
+      enabled: true,
+    };
+  }
+
+  /**
+   * Verify TOTP code or single-use backup code upon login.
+   */
+  async verifyTwoFactor(userId: string, code: string) {
+    const user = await this.userRepository.findOne({ where: { id: userId } });
+    if (!user || !user.isTwoFactorEnabled || !user.twoFactorSecret) {
+      throw new BadRequestException('Two-factor authentication is not enabled for this account');
+    }
+
+    const rawSecret = decryptSecret(user.twoFactorSecret, this.getEncryptionKey());
+    let verified = verifyTotp(code, rawSecret);
+
+    if (!verified && user.twoFactorBackupCodes?.length) {
+      const codeHash = hashBackupCode(code);
+      const codeIndex = user.twoFactorBackupCodes.indexOf(codeHash);
+      if (codeIndex !== -1) {
+        // Consume single-use backup code
+        user.twoFactorBackupCodes.splice(codeIndex, 1);
+        await this.userRepository.save(user);
+        verified = true;
+      }
+    }
+
+    if (!verified) {
+      throw new UnauthorizedException('Invalid 2FA code or backup code');
+    }
+
+    const tokens = this.generateTokenPair(user);
+    await this.storeRefreshToken(user.id, tokens.refreshToken);
+    return tokens;
+  }
+
+  /**
+   * Disable 2FA after validating a valid TOTP or backup code.
+   */
+  async disableTwoFactor(userId: string, code: string) {
+    const user = await this.userRepository.findOne({ where: { id: userId } });
+    if (!user || !user.isTwoFactorEnabled) {
+      throw new BadRequestException('Two-factor authentication is not enabled');
+    }
+
+    const rawSecret = decryptSecret(user.twoFactorSecret, this.getEncryptionKey());
+    let verified = verifyTotp(code, rawSecret);
+
+    if (!verified && user.twoFactorBackupCodes?.length) {
+      const codeHash = hashBackupCode(code);
+      if (user.twoFactorBackupCodes.includes(codeHash)) {
+        verified = true;
+      }
+    }
+
+    if (!verified) {
+      throw new UnauthorizedException('Invalid 2FA code');
+    }
+
+    user.isTwoFactorEnabled = false;
+    user.twoFactorSecret = null;
+    user.twoFactorBackupCodes = null;
+    await this.userRepository.save(user);
+
+    return {
+      message: 'Two-factor authentication successfully disabled',
+      enabled: false,
+    };
+  }
+
+  /**
    * Handle OAuth2 social login for both Google and GitHub.
-   * - If a matching OAuthProvider record exists, return the linked user's tokens.
-   * - If the OAuth email matches an existing account, link the provider and return tokens.
-   * - Otherwise create a new user and link the provider.
    */
   async handleOAuthLogin(profile: OAuthProfile) {
     const providerType = profile.provider as OAuthProviderType;
 
-    // 1. Check for existing OAuth provider link
     const existingProvider = await this.oauthProviderRepository.findOne({
       where: { provider: providerType, providerUserId: profile.providerUserId },
       relations: { user: true },
     });
 
     if (existingProvider) {
-      // Sync profile data on every login
       existingProvider.displayName = profile.displayName;
       existingProvider.avatarUrl = profile.avatarUrl;
       await this.oauthProviderRepository.save(existingProvider);
@@ -162,13 +295,11 @@ export class AuthService {
       return tokens;
     }
 
-    // 2. Try to link to an existing account by email
     let user = profile.email
       ? await this.userRepository.findOne({ where: { email: profile.email } })
       : null;
 
     if (!user) {
-      // 3. Create a new user — derive username from displayName or provider ID
       const baseUsername = (
         profile.displayName?.replace(/\s+/g, '').toLowerCase() ||
         `${profile.provider}_${profile.providerUserId}`
@@ -184,13 +315,11 @@ export class AuthService {
       });
       await this.userRepository.save(user);
     } else {
-      // Sync profile data if missing
       if (!user.displayName) user.displayName = profile.displayName;
       if (!user.avatarUrl) user.avatarUrl = profile.avatarUrl;
       await this.userRepository.save(user);
     }
 
-    // 4. Create the OAuthProvider link
     const oauthProvider = this.oauthProviderRepository.create({
       provider: providerType,
       providerUserId: profile.providerUserId,
@@ -233,11 +362,9 @@ export class AuthService {
       throw new UnauthorizedException('Refresh token has expired');
     }
 
-    // Revoke the old token
     storedToken.revokedAt = new Date();
     await this.refreshTokenRepository.save(storedToken);
 
-    // Get the user
     const user = await this.userRepository.findOne({
       where: { id: storedToken.userId },
     });
@@ -246,7 +373,6 @@ export class AuthService {
       throw new UnauthorizedException('User not found');
     }
 
-    // Generate new tokens
     const newTokens = this.generateTokenPair(user);
     await this.storeRefreshToken(user.id, newTokens.refreshToken);
 
