@@ -32,11 +32,13 @@ import { AppService } from './app.service';
 import { StreakModule } from './streak/streak.module';
 import { SocialModule } from './social/social.module';
 import { JobsModule } from './jobs/jobs.module';
+import { EmailModule } from './email/email.module';
 
 @Module({
   imports: [
     AppConfigModule,
     JobsModule,
+    EmailModule,
     DatabaseModule,
     EventEmitterModule.forRoot({ global: true }),
     AuthModule,
