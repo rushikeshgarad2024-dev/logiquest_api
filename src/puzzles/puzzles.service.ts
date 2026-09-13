@@ -8,6 +8,7 @@ import { Tag } from '../tags/entities/tag.entity';
 import { CreatePuzzleDto } from './dto/create-puzzle.dto';
 import { UpdatePuzzleDto } from './dto/update-puzzle.dto';
 import { GetPuzzlesFilterDto } from './dto/get-puzzles-filter.dto';
+import { SearchPuzzlesDto } from './dto/search-puzzles.dto';
 import { Role } from '../common/enums/role.enum';
 import { UpsertPuzzleTranslationDto } from './dto/upsert-puzzle-translation.dto';
 import { PuzzleTranslationResponseDto } from './dto/puzzle-translation-response.dto';
@@ -98,6 +99,98 @@ export class PuzzlesService {
     });
   }
 
+
+
+  async search(dto: SearchPuzzlesDto) {
+    const rawQuery = dto.q ? dto.q.trim() : '';
+
+    // If query is empty, fall back to standard paginated list
+    if (!rawQuery) {
+      return this.findAll({
+        difficulty: dto.difficulty,
+        category: dto.category,
+        tags: dto.tags,
+        page: dto.page,
+        limit: dto.limit,
+      });
+    }
+
+    if (rawQuery.length < 2) {
+      throw new BadRequestException('Search query must be at least 2 characters');
+    }
+
+    const page = dto.page ?? 1;
+    const limit = dto.limit ?? 20;
+    const searchTerm = `%${rawQuery}%`;
+
+    const qb = this.puzzleRepository
+      .createQueryBuilder('puzzle')
+      .leftJoinAndSelect('puzzle.category', 'category')
+      .leftJoinAndSelect('puzzle.tags', 'tags');
+
+    qb.andWhere(
+      '(puzzle.title ILIKE :search OR puzzle.description ILIKE :search OR category.name ILIKE :search)',
+      { search: searchTerm },
+    );
+
+    if (dto.difficulty) {
+      qb.andWhere('puzzle.difficulty = :difficulty', { difficulty: dto.difficulty });
+    }
+
+    if (dto.category) {
+      const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(dto.category);
+      if (isUuid) {
+        qb.andWhere('category.id = :categoryId', { categoryId: dto.category });
+      } else {
+        qb.andWhere('category.slug = :categorySlug', { categorySlug: dto.category });
+      }
+    }
+
+    if (dto.tags) {
+      const tagSlugs = dto.tags.split(',').map((s) => s.trim()).filter(Boolean);
+      if (tagSlugs.length > 0) {
+        qb.innerJoin('puzzle.tags', 'filterTags', 'filterTags.slug IN (:...tagSlugs)', { tagSlugs });
+      }
+    }
+
+    qb.addSelect(
+      `CASE
+        WHEN puzzle.title ILIKE :exact THEN 3
+        WHEN puzzle.title ILIKE :search THEN 2
+        WHEN category.name ILIKE :search THEN 1.5
+        ELSE 1
+      END`,
+      'relevance_score',
+    )
+    .setParameter('exact', rawQuery)
+    .orderBy('relevance_score', 'DESC')
+    .addOrderBy('puzzle.createdAt', 'DESC')
+    .skip((page - 1) * limit)
+    .take(limit);
+
+    const [items, total] = await qb.getManyAndCount();
+
+    const data = items.map((puzzle) => {
+      let score = 1.0;
+      const lowerQ = rawQuery.toLowerCase();
+      if (puzzle.title.toLowerCase().includes(lowerQ)) score += 2.0;
+      if (puzzle.category?.name?.toLowerCase().includes(lowerQ)) score += 1.5;
+      if (puzzle.description?.toLowerCase().includes(lowerQ)) score += 0.5;
+
+      return {
+        ...puzzle,
+        relevanceScore: Math.round(score * 10) / 10,
+      };
+    });
+
+    return {
+      data,
+      total,
+      page,
+      limit,
+      query: rawQuery,
+    };
+  }
 
   async findAll(filter: GetPuzzlesFilterDto) {
     const page = filter.page ?? 1;
