@@ -24,6 +24,7 @@ import { PuzzlesService } from './puzzles.service';
 import { CreatePuzzleDto } from './dto/create-puzzle.dto';
 import { UpdatePuzzleDto } from './dto/update-puzzle.dto';
 import { GetPuzzlesFilterDto } from './dto/get-puzzles-filter.dto';
+import { SearchPuzzlesDto } from './dto/search-puzzles.dto';
 import { SetPuzzleTagsDto } from './dto/set-puzzle-tags.dto';
 import { UpsertPuzzleTranslationDto } from './dto/upsert-puzzle-translation.dto';
 import { PuzzleTranslationResponseDto } from './dto/puzzle-translation-response.dto';
@@ -75,6 +76,15 @@ export class PuzzlesController {
   findMySubmissions(@Request() req) {
     const authorId = req.user.id;
     return this.puzzlesService.findMySubmissions(authorId);
+  }
+
+
+  @Get('search')
+  @ApiOperation({ summary: 'Full-text search puzzles across title, description, and category' })
+  @ApiResponse({ status: 200, description: 'Relevance-ranked search results' })
+  @ApiResponse({ status: 400, description: 'Search query under 2 characters' })
+  search(@Query() queryDto: SearchPuzzlesDto) {
+    return this.puzzlesService.search(queryDto);
   }
 
   @Get()
