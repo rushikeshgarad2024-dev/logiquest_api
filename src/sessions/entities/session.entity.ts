@@ -26,6 +26,10 @@ export class Session {
   @Column()
   puzzleId!: string;
 
+  @ApiPropertyOptional({ example: 'uuid-version-id', description: 'Pinned puzzle version active when session started' })
+  @Column({ nullable: true })
+  puzzleVersionId!: string;
+
   @ApiProperty({ enum: SessionStatus, example: SessionStatus.ACTIVE, description: 'Current session state' })
   @Column({ type: 'enum', enum: SessionStatus, default: SessionStatus.ACTIVE })
   status!: SessionStatus;
