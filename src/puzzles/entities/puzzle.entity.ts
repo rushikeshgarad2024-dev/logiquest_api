@@ -1,7 +1,8 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
-import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, ManyToOne, ManyToMany, JoinTable } from 'typeorm';
+import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, ManyToOne, ManyToMany, OneToMany, JoinTable } from 'typeorm';
 import { Category } from '../../categories/entities/category.entity';
 import { Tag } from '../../tags/entities/tag.entity';
+import { PuzzleVersion } from './puzzle-version.entity';
 
 export enum SubmissionStatus {
   PENDING = 'pending',
@@ -27,6 +28,14 @@ export class Puzzle {
   @ApiProperty({ example: 'medium', description: 'Difficulty level (easy | medium | hard)' })
   @Column()
   difficulty!: string;
+
+  @ApiProperty({ example: 1, description: 'Current active version number' })
+  @Column({ type: 'int', default: 1 })
+  currentVersion!: number;
+
+  @ApiPropertyOptional({ example: 'uuid-current-version-id', description: 'UUID of the latest active PuzzleVersion snapshot' })
+  @Column({ nullable: true })
+  currentVersionId!: string;
 
   @ApiPropertyOptional({ description: 'Category this puzzle belongs to', nullable: true })
   @ManyToOne(() => Category, (category) => category.puzzles, { nullable: true, onDelete: 'SET NULL' })
@@ -60,6 +69,9 @@ export class Puzzle {
     inverseJoinColumn: { name: 'tagId', referencedColumnName: 'id' },
   })
   tags!: Tag[];
+
+  @OneToMany(() => PuzzleVersion, (version) => version.puzzle)
+  versions!: PuzzleVersion[];
 
   @ApiProperty({ example: '2024-03-01T12:00:00.000Z', description: 'Puzzle creation timestamp' })
   @CreateDateColumn()
