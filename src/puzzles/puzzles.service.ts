@@ -1,7 +1,8 @@
-import { ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
+import { ForbiddenException, Injectable, NotFoundException, BadRequestException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { In, Repository } from 'typeorm';
 import { Puzzle } from './entities/puzzle.entity';
+import { PuzzleVersion } from './entities/puzzle-version.entity';
 import { PuzzleTranslation } from './entities/puzzle-translation.entity';
 import { Category } from '../categories/entities/category.entity';
 import { Tag } from '../tags/entities/tag.entity';
@@ -14,7 +15,6 @@ import { PuzzleTranslationResponseDto } from './dto/puzzle-translation-response.
 import { validateLocale } from '../config/locale.helper';
 import { DEFAULT_LOCALE } from '../config/locale.config';
 import { StreakService } from '../streak/services/streak.service';
-
 
 /** Shape returned by GET /puzzles/:id — localised title/description/hints merged on top. */
 export interface LocalisedPuzzle extends Omit<Puzzle, 'title' | 'description'> {
@@ -29,6 +29,8 @@ export class PuzzlesService {
   constructor(
     @InjectRepository(Puzzle)
     private readonly puzzleRepository: Repository<Puzzle>,
+    @InjectRepository(PuzzleVersion)
+    private readonly versionRepository: Repository<PuzzleVersion>,
     @InjectRepository(Category)
     private readonly categoryRepository: Repository<Category>,
     @InjectRepository(Tag)
@@ -39,9 +41,7 @@ export class PuzzlesService {
   ) {}
 
   async completePuzzle(userId: string, puzzleId: string) {
-  
     await this.streakService.recordPuzzleCompletion(userId);
-
   }
 
   async create(dto: CreatePuzzleDto, authorId: string): Promise<Puzzle> {
@@ -62,9 +62,27 @@ export class PuzzlesService {
       effects: dto.effects,
       category,
       authorId,
+      currentVersion: 1,
     });
 
-    return this.puzzleRepository.save(puzzle);
+    const savedPuzzle = await this.puzzleRepository.save(puzzle);
+
+    // Create initial Version 1 snapshot
+    const initialVersion = this.versionRepository.create({
+      puzzleId: savedPuzzle.id,
+      versionNumber: 1,
+      title: savedPuzzle.title,
+      description: savedPuzzle.description,
+      difficulty: savedPuzzle.difficulty,
+      conditions: savedPuzzle.conditions,
+      effects: savedPuzzle.effects,
+      authorId,
+      changelog: 'Initial version',
+    });
+    const savedVersion = await this.versionRepository.save(initialVersion);
+
+    savedPuzzle.currentVersionId = savedVersion.id;
+    return this.puzzleRepository.save(savedPuzzle);
   }
 
   async submitDraft(dto: CreatePuzzleDto, authorId: string): Promise<Puzzle> {
@@ -85,9 +103,26 @@ export class PuzzlesService {
       category,
       authorId,
       submissionStatus: 'pending' as any,
+      currentVersion: 1,
     });
 
-    return this.puzzleRepository.save(puzzle);
+    const savedPuzzle = await this.puzzleRepository.save(puzzle);
+
+    const initialVersion = this.versionRepository.create({
+      puzzleId: savedPuzzle.id,
+      versionNumber: 1,
+      title: savedPuzzle.title,
+      description: savedPuzzle.description,
+      difficulty: savedPuzzle.difficulty,
+      conditions: savedPuzzle.conditions,
+      effects: savedPuzzle.effects,
+      authorId,
+      changelog: 'Initial draft submission',
+    });
+    const savedVersion = await this.versionRepository.save(initialVersion);
+
+    savedPuzzle.currentVersionId = savedVersion.id;
+    return this.puzzleRepository.save(savedPuzzle);
   }
 
   async findMySubmissions(authorId: string): Promise<Puzzle[]> {
@@ -97,7 +132,6 @@ export class PuzzlesService {
       relations: { category: true },
     });
   }
-
 
   async findAll(filter: GetPuzzlesFilterDto) {
     const page = filter.page ?? 1;
@@ -160,189 +194,182 @@ export class PuzzlesService {
       where: { id },
       relations: { category: true, tags: true },
     });
-
     if (!puzzle) {
       throw new NotFoundException(`Puzzle with ID "${id}" not found`);
     }
-
     return puzzle;
   }
 
-  /**
-   * Returns a puzzle with its content localised to `locale`.
-   * Falls back to the base Puzzle row (English) if no translation row exists.
-   */
-  async findOneLocalised(id: string, locale: string): Promise<LocalisedPuzzle> {
+  async update(id: string, dto: UpdatePuzzleDto, authorId: string, role?: Role): Promise<Puzzle> {
     const puzzle = await this.findOne(id);
 
-    // Base puzzle IS the English content — no translation lookup needed for 'en'.
-    if (locale === DEFAULT_LOCALE) {
-      return this.mergeBaseAsLocalised(puzzle, DEFAULT_LOCALE);
+    if (role !== Role.ADMIN && puzzle.authorId !== authorId) {
+      throw new ForbiddenException('You do not have permission to update this puzzle');
     }
 
-    const translation = await this.translationRepository.findOne({
-      where: { puzzleId: id, locale },
-    });
-
-    if (!translation) {
-      // Graceful fallback to English base content.
-      return this.mergeBaseAsLocalised(puzzle, DEFAULT_LOCALE);
-    }
-
-    return {
-      ...puzzle,
-      title: translation.title,
-      description: translation.description,
-      hints: translation.hints,
-      locale,
-    };
-  }
-
-  private mergeBaseAsLocalised(puzzle: Puzzle, locale: string): LocalisedPuzzle {
-    return {
-      ...puzzle,
-      // Base Puzzle has no hints column — callers expecting hints will get null.
-      hints: null,
-      locale,
-    };
-  }
-
-  async update(id: string, dto: UpdatePuzzleDto): Promise<Puzzle> {
-    const puzzle = await this.puzzleRepository.findOne({
-      where: { id },
-      relations: { category: true },
-    });
-
-    if (!puzzle) {
-      throw new NotFoundException(`Puzzle with ID "${id}" not found`);
-    }
-
-    if (dto.categoryId !== undefined) {
-      if (dto.categoryId === null) {
-        puzzle.category = null;
-      } else {
-        const category = await this.categoryRepository.findOne({ where: { id: dto.categoryId } });
-        if (!category) {
-          throw new NotFoundException(`Category with ID "${dto.categoryId}" not found`);
-        }
-        puzzle.category = category;
+    if (dto.categoryId) {
+      const category = await this.categoryRepository.findOne({ where: { id: dto.categoryId } });
+      if (!category) {
+        throw new NotFoundException(`Category with ID "${dto.categoryId}" not found`);
       }
+      puzzle.category = category;
     }
 
+    const nextVersionNumber = (puzzle.currentVersion || 1) + 1;
+
+    // Apply updates
     if (dto.title !== undefined) puzzle.title = dto.title;
     if (dto.description !== undefined) puzzle.description = dto.description;
     if (dto.difficulty !== undefined) puzzle.difficulty = dto.difficulty;
     if (dto.conditions !== undefined) puzzle.conditions = dto.conditions;
     if (dto.effects !== undefined) puzzle.effects = dto.effects;
 
+    // Snapshot as new version
+    const newVersion = this.versionRepository.create({
+      puzzleId: puzzle.id,
+      versionNumber: nextVersionNumber,
+      title: puzzle.title,
+      description: puzzle.description,
+      difficulty: puzzle.difficulty,
+      conditions: puzzle.conditions,
+      effects: puzzle.effects,
+      authorId,
+      changelog: `Updated to version ${nextVersionNumber}`,
+    });
+    const savedVersion = await this.versionRepository.save(newVersion);
+
+    puzzle.currentVersion = nextVersionNumber;
+    puzzle.currentVersionId = savedVersion.id;
+
     return this.puzzleRepository.save(puzzle);
   }
 
-  async remove(id: string): Promise<void> {
-    const puzzle = await this.puzzleRepository.findOne({ where: { id } });
-    if (!puzzle) {
-      throw new NotFoundException(`Puzzle with ID "${id}" not found`);
+  async remove(id: string, role?: Role): Promise<void> {
+    if (role !== Role.ADMIN) {
+      throw new ForbiddenException('Only admins can delete puzzles');
     }
+    const puzzle = await this.findOne(id);
     await this.puzzleRepository.remove(puzzle);
   }
 
-  async setTags(id: string, tagIds: string[], userId: string, userRole: Role): Promise<Puzzle> {
-    const puzzle = await this.puzzleRepository.findOne({
-      where: { id },
-      relations: { category: true, tags: true },
+  /**
+   * Return full version history for a puzzle (Admin only)
+   */
+  async getVersions(puzzleId: string): Promise<PuzzleVersion[]> {
+    await this.findOne(puzzleId);
+    return this.versionRepository.find({
+      where: { puzzleId },
+      order: { versionNumber: 'DESC' },
     });
+  }
 
-    if (!puzzle) {
-      throw new NotFoundException(`Puzzle with ID "${id}" not found`);
+  /**
+   * Return a specific version snapshot of a puzzle
+   */
+  async getVersion(puzzleId: string, versionId: string): Promise<PuzzleVersion> {
+    await this.findOne(puzzleId);
+    let version: PuzzleVersion | null = null;
+
+    const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(versionId);
+    if (isUuid) {
+      version = await this.versionRepository.findOne({ where: { id: versionId, puzzleId } });
+    } else if (!isNaN(Number(versionId))) {
+      version = await this.versionRepository.findOne({ where: { versionNumber: Number(versionId), puzzleId } });
     }
 
-    if (userRole !== Role.ADMIN && puzzle.authorId !== userId) {
-      throw new ForbiddenException('Only the puzzle author or an admin can update tags');
+    if (!version) {
+      throw new NotFoundException(`Puzzle version "${versionId}" not found for puzzle "${puzzleId}"`);
     }
+    return version;
+  }
 
-    const uniqueTagIds = [...new Set(tagIds)];
-    const tags = uniqueTagIds.length > 0 ? await this.tagRepository.find({ where: { id: In(uniqueTagIds) } }) : [];
+  /**
+   * Roll back a puzzle to a previous version snapshot and activate it as a new latest version
+   */
+  async rollback(puzzleId: string, targetVersionId: string, authorId: string): Promise<Puzzle> {
+    const puzzle = await this.findOne(puzzleId);
+    const targetVersion = await this.getVersion(puzzleId, targetVersionId);
 
-    if (tags.length !== uniqueTagIds.length) {
-      const foundIds = new Set(tags.map((tag) => tag.id));
-      const missingIds = uniqueTagIds.filter((tagId) => !foundIds.has(tagId));
-      throw new NotFoundException(`Tag(s) not found: ${missingIds.join(', ')}`);
+    const nextVersionNumber = (puzzle.currentVersion || 1) + 1;
+
+    puzzle.title = targetVersion.title;
+    puzzle.description = targetVersion.description;
+    puzzle.difficulty = targetVersion.difficulty;
+    puzzle.conditions = targetVersion.conditions;
+    puzzle.effects = targetVersion.effects;
+
+    const restoredVersion = this.versionRepository.create({
+      puzzleId: puzzle.id,
+      versionNumber: nextVersionNumber,
+      title: puzzle.title,
+      description: puzzle.description,
+      difficulty: puzzle.difficulty,
+      conditions: puzzle.conditions,
+      effects: puzzle.effects,
+      authorId,
+      changelog: `Rollback to version ${targetVersion.versionNumber}`,
+    });
+    const savedVersion = await this.versionRepository.save(restoredVersion);
+
+    puzzle.currentVersion = nextVersionNumber;
+    puzzle.currentVersionId = savedVersion.id;
+
+    return this.puzzleRepository.save(puzzle);
+  }
+
+  async setTags(puzzleId: string, tagIds: string[], role?: Role): Promise<Puzzle> {
+    if (role !== Role.ADMIN) {
+      throw new ForbiddenException('Only admins can manage puzzle tags');
     }
-
+    const puzzle = await this.findOne(puzzleId);
+    if (tagIds.length === 0) {
+      puzzle.tags = [];
+      return this.puzzleRepository.save(puzzle);
+    }
+    const tags = await this.tagRepository.find({ where: { id: In(tagIds) } });
     puzzle.tags = tags;
     return this.puzzleRepository.save(puzzle);
   }
 
-  // ──────────────────────────────────────────────────────────────────────────
-  // Translation management (admin)
-  // ──────────────────────────────────────────────────────────────────────────
-
-  /**
-   * Upserts a translation for the given puzzle.
-   * Validates the locale against SUPPORTED_LOCALES (throws 400 if invalid).
-   * Creates if the (puzzleId, locale) pair doesn't exist; updates otherwise.
-   */
   async upsertTranslation(
     puzzleId: string,
     dto: UpsertPuzzleTranslationDto,
+    authorId: string,
   ): Promise<PuzzleTranslationResponseDto> {
-    // Ensure the puzzle exists first — 404 if not.
+    const locale = validateLocale(dto.locale);
     await this.findOne(puzzleId);
 
-    // Throws BadRequestException for unsupported locales.
-    validateLocale(dto.locale);
-
-    const existing = await this.translationRepository.findOne({
-      where: { puzzleId, locale: dto.locale },
+    let translation = await this.translationRepository.findOne({
+      where: { puzzleId, locale },
     });
 
-    let translation: PuzzleTranslation;
-
-    if (existing) {
-      existing.title = dto.title;
-      existing.description = dto.description;
-      existing.hints = dto.hints ?? null;
-      translation = await this.translationRepository.save(existing);
+    if (translation) {
+      translation.title = dto.title;
+      translation.description = dto.description;
+      translation.hints = dto.hints ?? null;
+      translation.authorId = authorId;
     } else {
-      const created = this.translationRepository.create({
+      translation = this.translationRepository.create({
         puzzleId,
-        locale: dto.locale,
+        locale,
         title: dto.title,
         description: dto.description,
         hints: dto.hints ?? null,
+        authorId,
       });
-      translation = await this.translationRepository.save(created);
     }
 
-    return this.toResponseDto(translation);
-  }
-
-  /**
-   * Returns all translation rows for a puzzle (admin view).
-   * Returns an empty array if no translations exist yet.
-   */
-  async findAllTranslations(puzzleId: string): Promise<PuzzleTranslationResponseDto[]> {
-    // Ensure puzzle exists.
-    await this.findOne(puzzleId);
-
-    const translations = await this.translationRepository.find({
-      where: { puzzleId },
-      order: { locale: 'ASC' },
-    });
-
-    return translations.map((t) => this.toResponseDto(t));
-  }
-
-  private toResponseDto(t: PuzzleTranslation): PuzzleTranslationResponseDto {
-    const dto = new PuzzleTranslationResponseDto();
-    dto.id = t.id;
-    dto.puzzleId = t.puzzleId;
-    dto.locale = t.locale;
-    dto.title = t.title;
-    dto.description = t.description;
-    dto.hints = t.hints;
-    dto.createdAt = t.createdAt;
-    dto.updatedAt = t.updatedAt;
-    return dto;
+    const saved = await this.translationRepository.save(translation);
+    return {
+      id: saved.id,
+      puzzleId: saved.puzzleId,
+      locale: saved.locale,
+      title: saved.title,
+      description: saved.description,
+      hints: saved.hints,
+      authorId: saved.authorId,
+      createdAt: saved.createdAt,
+      updatedAt: saved.updatedAt,
+    };
   }
 }
